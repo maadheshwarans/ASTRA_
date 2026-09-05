@@ -1,0 +1,500 @@
+import os
+import numpy as np
+import librosa
+import tensorflow as tf
+
+# ============================================================
+# ASTRA-Edge Batch Model Diagnostic
+# ============================================================
+
+SAMPLE_RATE = 16000
+DURATION = 1.5
+
+N_MFCC = 13
+N_FFT = 512
+HOP_LENGTH = 160
+
+ASTRA_THRESHOLD = 0.50
+
+# ------------------------------------------------------------
+# Project paths
+# ------------------------------------------------------------
+
+PROJECT_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+DATASET_DIR = os.path.join(PROJECT_DIR, "dataset")
+MODEL_PATH = os.path.join(
+    PROJECT_DIR,
+    "models",
+    "astra_cnn.keras"
+)
+
+NORMALIZATION_PATH = os.path.join(
+    PROJECT_DIR,
+    "models",
+    "normalization.npz"
+)
+
+# ------------------------------------------------------------
+# Extract MFCC exactly like training
+# ------------------------------------------------------------
+
+def extract_mfcc(filepath):
+
+    audio, sr = librosa.load(
+        filepath,
+        sr=SAMPLE_RATE,
+        mono=True
+    )
+
+    expected_samples = int(
+        SAMPLE_RATE * DURATION
+    )
+
+    if len(audio) < expected_samples:
+
+        audio = np.pad(
+            audio,
+            (0, expected_samples - len(audio))
+        )
+
+    else:
+
+        audio = audio[:expected_samples]
+
+    mfcc = librosa.feature.mfcc(
+        y=audio,
+        sr=SAMPLE_RATE,
+        n_mfcc=N_MFCC,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH
+    )
+
+    return mfcc.astype(np.float32)
+
+
+# ------------------------------------------------------------
+# Find category from folder structure
+# ------------------------------------------------------------
+
+def get_category(filepath):
+
+    relative_path = os.path.relpath(
+        filepath,
+        DATASET_DIR
+    )
+
+    parts = relative_path.split(os.sep)
+
+    categories = [
+        "positive",
+        "negative",
+        "background",
+        "hard_negatives"
+    ]
+
+    for category in categories:
+
+        if category in parts:
+            return category
+
+    return "unknown"
+
+
+# ------------------------------------------------------------
+# Get speaker
+# ------------------------------------------------------------
+
+def get_speaker(filepath):
+
+    relative_path = os.path.relpath(
+        filepath,
+        DATASET_DIR
+    )
+
+    parts = relative_path.split(os.sep)
+
+    if len(parts) >= 3:
+        return parts[0]
+
+    return "unknown"
+
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
+
+def main():
+
+    print()
+    print("=" * 90)
+    print("                 ASTRA-Edge MODEL DIAGNOSTIC")
+    print("=" * 90)
+    print()
+
+    # --------------------------------------------------------
+    # Check files
+    # --------------------------------------------------------
+
+    if not os.path.exists(MODEL_PATH):
+
+        print("ERROR: Model not found:")
+        print(MODEL_PATH)
+        return
+
+    if not os.path.exists(NORMALIZATION_PATH):
+
+        print("ERROR: Normalization file not found:")
+        print(NORMALIZATION_PATH)
+        return
+
+    # --------------------------------------------------------
+    # Load model
+    # --------------------------------------------------------
+
+    print("Loading model...")
+
+    model = tf.keras.models.load_model(
+        MODEL_PATH
+    )
+
+    print("Model loaded.")
+    print()
+
+    # --------------------------------------------------------
+    # Load normalization
+    # --------------------------------------------------------
+
+    normalization = np.load(
+        NORMALIZATION_PATH
+    )
+
+    mean = normalization["mean"]
+    std = normalization["std"]
+
+    print("Normalization loaded.")
+    print()
+
+    # --------------------------------------------------------
+    # Find WAV files
+    # --------------------------------------------------------
+
+    wav_files = []
+
+    for root, directories, filenames in os.walk(
+        DATASET_DIR
+    ):
+
+        for filename in filenames:
+
+            if filename.lower().endswith(".wav"):
+
+                wav_files.append(
+                    os.path.join(root, filename)
+                )
+
+    wav_files.sort()
+
+    if not wav_files:
+
+        print("ERROR: No WAV files found.")
+        return
+
+    print("Found", len(wav_files), "WAV files.")
+    print()
+
+    # --------------------------------------------------------
+    # Header
+    # --------------------------------------------------------
+
+    print(
+        f"{'Speaker':<10}"
+        f"{'Category':<18}"
+        f"{'File':<28}"
+        f"{'ASTRA %':>10}"
+        f"{'UNKNOWN %':>12}"
+        f"{'Prediction':>15}"
+    )
+
+    print("-" * 95)
+
+    # --------------------------------------------------------
+    # Statistics
+    # --------------------------------------------------------
+
+    results = []
+
+    # --------------------------------------------------------
+    # Process each file
+    # --------------------------------------------------------
+
+    for filepath in wav_files:
+
+        category = get_category(filepath)
+        speaker = get_speaker(filepath)
+
+        filename = os.path.basename(filepath)
+
+        try:
+
+            # Extract MFCC
+            mfcc = extract_mfcc(filepath)
+
+            # Add CNN channel dimension
+            X = mfcc[np.newaxis, ..., np.newaxis]
+
+            # Apply SAME normalization used during training
+            X = (X - mean) / std
+
+            # Model prediction
+            unknown_probability = float(
+                model.predict(
+                    X,
+                    verbose=0
+                )[0][0]
+            )
+
+            astra_probability = (
+                1.0 - unknown_probability
+            )
+
+            # Final prediction
+            if astra_probability >= ASTRA_THRESHOLD:
+
+                prediction = "ASTRA"
+
+            else:
+
+                prediction = "UNKNOWN"
+
+            # Store result
+            results.append(
+                {
+                    "speaker": speaker,
+                    "category": category,
+                    "filename": filename,
+                    "astra": astra_probability,
+                    "unknown": unknown_probability,
+                    "prediction": prediction
+                }
+            )
+
+            print(
+                f"{speaker:<10}"
+                f"{category:<18}"
+                f"{filename:<28}"
+                f"{astra_probability * 100:>9.2f}%"
+                f"{unknown_probability * 100:>11.2f}%"
+                f"{prediction:>15}"
+            )
+
+        except Exception as error:
+
+            print()
+            print("ERROR processing:", filepath)
+            print(error)
+            print()
+
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 90)
+    print("                              SUMMARY")
+    print("=" * 90)
+    print()
+
+    if not results:
+
+        print("No files were successfully processed.")
+        return
+
+    # --------------------------------------------------------
+    # Overall statistics
+    # --------------------------------------------------------
+
+    astra_values = [
+        result["astra"]
+        for result in results
+    ]
+
+    print(
+        f"Files tested              : {len(results)}"
+    )
+
+    print(
+        f"Average ASTRA probability : "
+        f"{np.mean(astra_values) * 100:.2f}%"
+    )
+
+    print(
+        f"Minimum ASTRA probability : "
+        f"{np.min(astra_values) * 100:.2f}%"
+    )
+
+    print(
+        f"Maximum ASTRA probability : "
+        f"{np.max(astra_values) * 100:.2f}%"
+    )
+
+    print()
+
+    # --------------------------------------------------------
+    # Category breakdown
+    # --------------------------------------------------------
+
+    categories = [
+        "positive",
+        "negative",
+        "background",
+        "hard_negatives"
+    ]
+
+    for category in categories:
+
+        category_results = [
+            result
+            for result in results
+            if result["category"] == category
+        ]
+
+        if not category_results:
+            continue
+
+        probabilities = [
+            result["astra"]
+            for result in category_results
+        ]
+
+        predictions = [
+            result["prediction"]
+            for result in category_results
+        ]
+
+        astra_count = predictions.count("ASTRA")
+        unknown_count = predictions.count("UNKNOWN")
+
+        print(
+            f"{category:<18}"
+            f"n={len(category_results):<5}"
+            f"avg ASTRA={np.mean(probabilities) * 100:>7.2f}%"
+            f"min={np.min(probabilities) * 100:>7.2f}%"
+            f"max={np.max(probabilities) * 100:>7.2f}%"
+            f"  ASTRA={astra_count:<3}"
+            f"UNKNOWN={unknown_count}"
+        )
+
+    print()
+
+    # --------------------------------------------------------
+    # Speaker breakdown
+    # --------------------------------------------------------
+
+    speakers = sorted(
+        set(
+            result["speaker"]
+            for result in results
+        )
+    )
+
+    print("Speaker breakdown")
+    print("-" * 90)
+
+    for speaker in speakers:
+
+        speaker_results = [
+            result
+            for result in results
+            if result["speaker"] == speaker
+        ]
+
+        probabilities = [
+            result["astra"]
+            for result in speaker_results
+        ]
+
+        print(
+            f"Speaker {speaker:<10}"
+            f"n={len(speaker_results):<5}"
+            f"avg ASTRA="
+            f"{np.mean(probabilities) * 100:.2f}%"
+        )
+
+    print()
+
+    # --------------------------------------------------------
+    # Diagnosis
+    # --------------------------------------------------------
+
+    probability_range = (
+        np.max(astra_values)
+        - np.min(astra_values)
+    )
+
+    print("=" * 90)
+    print("                             DIAGNOSIS")
+    print("=" * 90)
+    print()
+
+    print(
+        f"ASTRA probability range: "
+        f"{probability_range * 100:.2f} percentage points"
+    )
+
+    if probability_range < 0.05:
+
+        print()
+        print(
+            "WARNING:"
+        )
+
+        print(
+            "The model is producing almost the SAME "
+            "probability for every recording."
+        )
+
+        print(
+            "This strongly suggests the model has "
+            "not learned a useful ASTRA representation yet."
+        )
+
+    elif probability_range < 0.20:
+
+        print()
+        print(
+            "The model is responding somewhat differently "
+            "to recordings, but separation is still weak."
+        )
+
+    else:
+
+        print()
+        print(
+            "The model is producing noticeably different "
+            "outputs for different recordings."
+        )
+
+    print()
+    print("Remember:")
+    print(
+        "This dataset is far too small to judge "
+        "real-world performance."
+    )
+
+    print(
+        "The main purpose of this diagnostic is to "
+        "see what the current model has actually learned."
+    )
+
+    print()
+    print("=" * 90)
+    print()
+
+
+if __name__ == "__main__":
+    main()

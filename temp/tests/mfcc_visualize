@@ -1,0 +1,72 @@
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+import numpy as np
+
+# --------------------------------
+# Load audio
+# --------------------------------
+
+file_path = "dataset/background/background_001.wav"
+
+audio, sample_rate = librosa.load(
+    file_path,
+    sr=16000,
+    mono=True
+)
+
+# --------------------------------
+# Extract MFCC
+# --------------------------------
+
+mfcc = librosa.feature.mfcc(
+    y=audio,
+    sr=sample_rate,
+    n_mfcc=13,
+    n_fft=512,
+    hop_length=160
+)
+
+print("ASTRA-Edge MFCC Analysis")
+print("------------------------")
+print("Sample rate:", sample_rate)
+print("Audio samples:", len(audio))
+print("Duration:", len(audio) / sample_rate, "seconds")
+print("MFCC shape:", mfcc.shape)
+
+# --------------------------------
+# Normalize each coefficient
+# for visualization only
+# --------------------------------
+
+mfcc_visual = mfcc.copy()
+
+for i in range(mfcc_visual.shape[0]):
+    mean = np.mean(mfcc_visual[i])
+    std = np.std(mfcc_visual[i])
+
+    if std > 0:
+        mfcc_visual[i] = (mfcc_visual[i] - mean) / std
+
+# --------------------------------
+# Plot
+# --------------------------------
+
+plt.figure(figsize=(12, 5))
+
+librosa.display.specshow(
+    mfcc_visual,
+    x_axis="time",
+    sr=sample_rate,
+    hop_length=160,
+    cmap="coolwarm"
+)
+
+plt.colorbar(label="Normalized MFCC value")
+
+plt.title("ASTRA - Normalized MFCC Features")
+plt.xlabel("Time (seconds)")
+plt.ylabel("MFCC Coefficient")
+
+plt.tight_layout()
+plt.show()

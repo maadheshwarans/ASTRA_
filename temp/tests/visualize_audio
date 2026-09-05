@@ -1,0 +1,90 @@
+from scipy.io import wavfile
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Load audio
+file_path = "dataset/background/background_001.wav"
+
+sample_rate, audio = wavfile.read(file_path)
+
+# Make sure audio is one-dimensional
+audio = audio.flatten()
+
+# Create time axis
+time = np.arange(len(audio)) / sample_rate
+
+# Print basic information
+print("Audio information")
+print("------------------")
+print("Sample rate:", sample_rate, "Hz")
+print("Number of samples:", len(audio))
+print("Duration:", len(audio) / sample_rate, "seconds")
+print("Minimum amplitude:", audio.min())
+print("Maximum amplitude:", audio.max())
+
+# ------------------------------------------------
+# 1. WAVEFORM
+# ------------------------------------------------
+
+plt.figure(figsize=(12, 4))
+
+plt.plot(time, audio)
+
+plt.title("ASTRA - Audio Waveform")
+plt.xlabel("Time (seconds)")
+plt.ylabel("Amplitude")
+plt.grid()
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------
+# 2. FFT / FREQUENCY SPECTRUM
+# ------------------------------------------------
+
+N = len(audio)
+
+# FFT
+fft_result = np.fft.rfft(audio)
+
+# Magnitude
+magnitude = np.abs(fft_result)
+
+# Frequency axis
+frequencies = np.fft.rfftfreq(N, 1 / sample_rate)
+
+plt.figure(figsize=(12, 4))
+
+plt.plot(frequencies, magnitude)
+
+plt.title("ASTRA - Frequency Spectrum")
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Magnitude")
+plt.xlim(0, 8000)
+plt.grid()
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------
+# 3. SPECTROGRAM
+# ------------------------------------------------
+
+plt.figure(figsize=(12, 5))
+
+plt.specgram(
+    audio,
+    Fs=sample_rate,
+    NFFT=512,
+    noverlap=256
+)
+
+plt.title("ASTRA - Spectrogram")
+plt.xlabel("Time (seconds)")
+plt.ylabel("Frequency (Hz)")
+plt.ylim(0, 8000)
+
+plt.colorbar(label="Intensity")
+
+plt.tight_layout()
+plt.show()

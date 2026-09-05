@@ -1,0 +1,473 @@
+import os
+import numpy as np
+import librosa
+import sounddevice as sd
+import soundfile as sf
+import tensorflow as tf
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+SAMPLE_RATE = 16000
+DURATION = 1.5
+
+N_MFCC = 13
+N_FFT = 512
+HOP_LENGTH = 160
+
+MODEL_PATH = "models/astra_cnn_speaker1.keras"
+NORMALIZATION_PATH = "models/normalization_speaker1.npz"
+
+TEST_WAV_PATH = "dataset/1/positive/positive_001.wav"
+
+THRESHOLD = 0.50
+
+# Must match preprocessing/prepare_dataset.py
+TARGET_RMS = 0.03
+MAX_GAIN = 5.0
+
+
+# ============================================================
+# LOAD MODEL
+# ============================================================
+
+print("Loading model...")
+
+model = tf.keras.models.load_model(MODEL_PATH)
+
+print("Model loaded successfully.")
+
+
+# ============================================================
+# LOAD MFCC NORMALIZATION STATISTICS
+# ============================================================
+
+stats = np.load(NORMALIZATION_PATH)
+
+mean = stats["mean"]
+std = stats["std"]
+
+# Training code saves:
+# (1, 13, 1, 1)
+#
+# Convert to:
+# (13,)
+
+mean = mean.reshape(-1)
+std = std.reshape(-1)
+
+print()
+print("Normalization statistics")
+print("-------------------------")
+print("Mean shape :", mean.shape)
+print("Std shape  :", std.shape)
+
+
+# ============================================================
+# AMPLITUDE NORMALIZATION
+# ============================================================
+
+def normalize_amplitude(audio):
+    """
+    Normalize the loudness of an audio recording.
+
+    This MUST be identical to the normalization used during
+    dataset preprocessing.
+    """
+
+    rms = np.sqrt(np.mean(audio ** 2))
+
+    if rms < 1e-6:
+        return audio
+
+    gain = min(TARGET_RMS / rms, MAX_GAIN)
+
+    audio = audio * gain
+
+    # Prevent clipping
+    peak = np.max(np.abs(audio))
+
+    if peak > 0.99:
+        audio = audio / peak * 0.99
+
+    return audio
+
+
+# ============================================================
+# AUDIO DIAGNOSTICS
+# ============================================================
+
+def print_audio_diagnostics(audio):
+    rms = np.sqrt(np.mean(audio ** 2))
+    peak = np.max(np.abs(audio))
+
+    print()
+    print("Audio diagnostics")
+    print("-----------------")
+    print(f"Samples : {len(audio)}")
+    print(f"RMS     : {rms:.8f}")
+    print(f"Peak    : {peak:.8f}")
+
+    if rms < 1e-6:
+        print("WARNING: Audio appears to be silent.")
+
+    elif rms < 0.001:
+        print("WARNING: Audio level is very low.")
+
+    elif rms > 0.5:
+        print("WARNING: Audio level is very high.")
+
+    else:
+        print("Audio level looks reasonable.")
+
+
+# ============================================================
+# EXTRACT MFCC
+# ============================================================
+
+def extract_mfcc(filepath):
+    """
+    Load a WAV file and convert it into the exact feature
+    representation expected by the CNN.
+    """
+
+    print()
+    print("Loading audio...")
+
+    audio, sr = librosa.load(
+        filepath,
+        sr=SAMPLE_RATE,
+        mono=True
+    )
+
+    # --------------------------------------------------------
+    # FORCE EXACT 1.5 SECOND LENGTH
+    # --------------------------------------------------------
+
+    expected_samples = int(SAMPLE_RATE * DURATION)
+
+    if len(audio) < expected_samples:
+
+        audio = np.pad(
+            audio,
+            (0, expected_samples - len(audio))
+        )
+
+    else:
+
+        audio = audio[:expected_samples]
+
+    # --------------------------------------------------------
+    # DIAGNOSTICS BEFORE AMPLITUDE NORMALIZATION
+    # --------------------------------------------------------
+
+    print_audio_diagnostics(audio)
+
+    # --------------------------------------------------------
+    # AMPLITUDE NORMALIZATION
+    # --------------------------------------------------------
+
+    original_rms = np.sqrt(np.mean(audio ** 2))
+
+    audio = normalize_amplitude(audio)
+
+    normalized_rms = np.sqrt(np.mean(audio ** 2))
+    normalized_peak = np.max(np.abs(audio))
+
+    print()
+    print("Amplitude normalization")
+    print("------------------------")
+    print(f"Original RMS   : {original_rms:.8f}")
+    print(f"Target RMS     : {TARGET_RMS:.8f}")
+    print(f"Final RMS      : {normalized_rms:.8f}")
+    print(f"Final Peak     : {normalized_peak:.8f}")
+
+    # --------------------------------------------------------
+    # MFCC
+    # --------------------------------------------------------
+
+    mfcc = librosa.feature.mfcc(
+        y=audio,
+        sr=SAMPLE_RATE,
+        n_mfcc=N_MFCC,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH
+    )
+
+    print()
+    print("MFCC")
+    print("----")
+    print(f"MFCC shape: {mfcc.shape}")
+    print(f"MFCC min  : {mfcc.min():.4f}")
+    print(f"MFCC max  : {mfcc.max():.4f}")
+    print(f"MFCC mean : {mfcc.mean():.4f}")
+
+    # --------------------------------------------------------
+    # MFCC NORMALIZATION
+    # --------------------------------------------------------
+
+    mfcc_normalized = (
+        mfcc - mean[:, None]
+    ) / (
+        std[:, None] + 1e-8
+    )
+
+    print()
+    print("Normalized MFCC")
+    print("---------------")
+    print(f"Min  : {mfcc_normalized.min():.4f}")
+    print(f"Max  : {mfcc_normalized.max():.4f}")
+    print(f"Mean : {mfcc_normalized.mean():.4f}")
+
+    # --------------------------------------------------------
+    # ADD CNN CHANNEL DIMENSION
+    # --------------------------------------------------------
+
+    mfcc_normalized = mfcc_normalized.astype(np.float32)
+
+    X = mfcc_normalized[..., np.newaxis]
+
+    # --------------------------------------------------------
+    # ADD BATCH DIMENSION
+    # --------------------------------------------------------
+
+    X = X[np.newaxis, ...]
+
+    print()
+    print("Model input shape:", X.shape)
+
+    return X
+
+
+# ============================================================
+# PREDICT WAV FILE
+# ============================================================
+
+def predict_wav(filepath):
+
+    print()
+    print("=" * 65)
+    print("Testing WAV")
+    print("=" * 65)
+
+    print()
+    print("File:")
+    print(filepath)
+
+    if not os.path.exists(filepath):
+
+        print()
+        print("ERROR: File does not exist.")
+
+        return
+
+    try:
+
+        X = extract_mfcc(filepath)
+
+        # ----------------------------------------------------
+        # MODEL PREDICTION
+        # ----------------------------------------------------
+
+        prediction = model.predict(
+            X,
+            verbose=0
+        )
+
+        # Model output:
+        #
+        # 0 -> ASTRA
+        # 1 -> UNKNOWN
+        #
+        # Therefore:
+
+        unknown_probability = float(prediction[0][0])
+
+        astra_probability = 1.0 - unknown_probability
+
+        # ----------------------------------------------------
+        # RESULT
+        # ----------------------------------------------------
+
+        print()
+        print("=" * 65)
+        print("RESULT")
+        print("=" * 65)
+
+        print()
+        print(
+            f"ASTRA probability   : "
+            f"{astra_probability * 100:.2f}%"
+        )
+
+        print(
+            f"UNKNOWN probability : "
+            f"{unknown_probability * 100:.2f}%"
+        )
+
+        if astra_probability >= THRESHOLD:
+
+            result = "ASTRA"
+
+        else:
+
+            result = "UNKNOWN"
+
+        print()
+        print(f"Prediction          : {result}")
+        print(f"Threshold           : {THRESHOLD:.2f}")
+
+        print()
+
+    except Exception as e:
+
+        print()
+        print("ERROR while processing audio:")
+        print(e)
+
+
+# ============================================================
+# RECORD FROM MICROPHONE
+# ============================================================
+
+def record_microphone():
+
+    print()
+    print("=" * 65)
+    print("MICROPHONE TEST")
+    print("=" * 65)
+
+    print()
+    print(f"Sample rate : {SAMPLE_RATE} Hz")
+    print(f"Duration    : {DURATION} seconds")
+
+    input(
+        "\nPress ENTER, then say 'ASTRA'..."
+    )
+
+    print()
+    print("Recording...")
+
+    samples = int(SAMPLE_RATE * DURATION)
+
+    audio = sd.rec(
+        samples,
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32"
+    )
+
+    sd.wait()
+
+    audio = audio.flatten()
+
+    print("Recording finished.")
+
+    # --------------------------------------------------------
+    # DIAGNOSTICS
+    # --------------------------------------------------------
+
+    print_audio_diagnostics(audio)
+
+    # --------------------------------------------------------
+    # SAVE RECORDING
+    # --------------------------------------------------------
+
+    os.makedirs(
+        os.path.dirname(TEST_WAV_PATH),
+        exist_ok=True
+    )
+
+    sf.write(
+        TEST_WAV_PATH,
+        audio,
+        SAMPLE_RATE
+    )
+
+    print()
+    print("Saved recording:")
+    print(TEST_WAV_PATH)
+
+    # --------------------------------------------------------
+    # IMPORTANT
+    #
+    # We now reload the WAV from disk instead of directly
+    # passing the microphone array to the model.
+    #
+    # This guarantees that microphone testing uses exactly
+    # the same loading/preprocessing path as WAV testing.
+    # --------------------------------------------------------
+
+    predict_wav(TEST_WAV_PATH)
+
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+def main():
+
+    while True:
+
+        print()
+        print("=" * 65)
+        print("ASTRA-Edge Keyword Spotting")
+        print("=" * 65)
+
+        print()
+        print("1. Test microphone")
+        print("2. Test WAV file")
+        print("3. Exit")
+
+        choice = input("\nChoose an option: ").strip()
+
+        # ----------------------------------------------------
+        # MICROPHONE
+        # ----------------------------------------------------
+
+        if choice == "1":
+
+            record_microphone()
+
+        # ----------------------------------------------------
+        # WAV FILE
+        # ----------------------------------------------------
+
+        elif choice == "2":
+
+            filepath = input(
+                "\nEnter WAV file path: "
+            ).strip()
+
+            # Remove surrounding quotes if user pasted
+            # a Windows path such as:
+            # "C:\Users\..."
+            filepath = filepath.strip('"')
+
+            predict_wav(filepath)
+
+        # ----------------------------------------------------
+        # EXIT
+        # ----------------------------------------------------
+
+        elif choice == "3":
+
+            print()
+            print("Exiting.")
+
+            break
+
+        else:
+
+            print()
+            print("Invalid choice. Please select 1, 2, or 3.")
+
+
+# ============================================================
+# PROGRAM ENTRY
+# ============================================================
+
+if __name__ == "__main__":
+    main()

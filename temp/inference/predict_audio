@@ -1,0 +1,480 @@
+print("===== NEW DIAGNOSTIC SCRIPT IS RUNNING =====")
+import os
+import numpy as np
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+import tensorflow as tf
+
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+SAMPLE_RATE = 16000
+DURATION = 1.5
+EXPECTED_SAMPLES = int(SAMPLE_RATE * DURATION)
+
+N_MFCC = 13
+N_FFT = 512
+HOP_LENGTH = 160
+
+MODEL_PATH = "models/astra_cnn_speaker1.keras"
+NORMALIZATION_PATH = "models/normalization_speaker1.npz"
+
+TEST_WAV_PATH = r"C:\Users\Dummy\Desktop\ASTRA-Edge\dataset\2\positive\positive_004.wav"
+
+TARGET_RMS = 0.03
+MAX_GAIN = 5.0
+
+THRESHOLD = 0.50
+
+OUTPUT_DIR = "tests"
+
+
+# ============================================================
+# LOAD MODEL
+# ============================================================
+
+print("=" * 65)
+print("ASTRA-Edge AUDIO DIAGNOSTIC")
+print("=" * 65)
+
+print("\nLoading model...")
+
+model = tf.keras.models.load_model(MODEL_PATH)
+
+print("Model loaded successfully.")
+
+print("\nLoading normalization statistics...")
+
+normalization = np.load(NORMALIZATION_PATH)
+
+mean = normalization["mean"]
+std = normalization["std"]
+
+print("Normalization loaded successfully.")
+
+
+# ============================================================
+# AUDIO NORMALIZATION
+# ============================================================
+
+def normalize_amplitude(audio):
+
+    rms = np.sqrt(np.mean(audio ** 2))
+
+    if rms < 1e-6:
+        return audio
+
+    gain = TARGET_RMS / rms
+
+    gain = min(gain, MAX_GAIN)
+
+    audio = audio * gain
+
+    peak = np.max(np.abs(audio))
+
+    if peak > 0.99:
+        audio = audio / peak * 0.99
+
+    return audio
+
+
+# ============================================================
+# LOAD AUDIO
+# ============================================================
+
+print("\n" + "=" * 65)
+print("LOADING AUDIO")
+print("=" * 65)
+
+print("\nFile:")
+print(TEST_WAV_PATH)
+
+if not os.path.exists(TEST_WAV_PATH):
+    raise FileNotFoundError(
+        f"\nCould not find:\n{TEST_WAV_PATH}"
+    )
+
+audio, sr = librosa.load(
+    TEST_WAV_PATH,
+    sr=SAMPLE_RATE,
+    mono=True
+)
+
+print("\nOriginal:")
+print("Samples     :", len(audio))
+print("Sample rate :", sr)
+print("Duration    :", len(audio) / SAMPLE_RATE, "seconds")
+
+
+# ============================================================
+# PAD / TRUNCATE
+# ============================================================
+
+if len(audio) < EXPECTED_SAMPLES:
+
+    print("\nAudio shorter than 1.5 seconds.")
+    print("Padding...")
+
+    audio = np.pad(
+        audio,
+        (0, EXPECTED_SAMPLES - len(audio))
+    )
+
+elif len(audio) > EXPECTED_SAMPLES:
+
+    print("\nAudio longer than 1.5 seconds.")
+    print("Taking first 1.5 seconds.")
+
+    audio = audio[:EXPECTED_SAMPLES]
+
+
+# ============================================================
+# AUDIO DIAGNOSTICS
+# ============================================================
+
+original_rms = np.sqrt(np.mean(audio ** 2))
+original_peak = np.max(np.abs(audio))
+
+print("\nAudio diagnostics")
+print("-----------------")
+
+print(f"RMS  : {original_rms:.8f}")
+print(f"Peak : {original_peak:.8f}")
+
+
+# ============================================================
+# NORMALIZATION
+# ============================================================
+
+audio = normalize_amplitude(audio)
+
+final_rms = np.sqrt(np.mean(audio ** 2))
+final_peak = np.max(np.abs(audio))
+
+print("\nAmplitude normalization")
+print("------------------------")
+
+print(f"Final RMS  : {final_rms:.8f}")
+print(f"Final Peak : {final_peak:.8f}")
+
+
+# ============================================================
+# MFCC
+# ============================================================
+
+mfcc = librosa.feature.mfcc(
+    y=audio,
+    sr=SAMPLE_RATE,
+    n_mfcc=N_MFCC,
+    n_fft=N_FFT,
+    hop_length=HOP_LENGTH
+)
+
+print("\nMFCC")
+print("----")
+
+print("Shape :", mfcc.shape)
+print(f"Min   : {mfcc.min():.4f}")
+print(f"Max   : {mfcc.max():.4f}")
+print(f"Mean  : {mfcc.mean():.4f}")
+
+
+# ============================================================
+# NORMALIZE MFCC
+# ============================================================
+
+mfcc_normalized = (
+    mfcc[np.newaxis, :, :, np.newaxis] - mean
+) / (std + 1e-8)
+
+print("\nNormalized MFCC")
+print("----------------")
+
+print(f"Min  : {mfcc_normalized.min():.4f}")
+print(f"Max  : {mfcc_normalized.max():.4f}")
+print(f"Mean : {mfcc_normalized.mean():.4f}")
+
+print("\nModel input:")
+print(mfcc_normalized.shape)
+
+
+# ============================================================
+# SPEECH / ENERGY ANALYSIS
+# ============================================================
+
+frame_length = 400
+energy_hop = 160
+
+rms = librosa.feature.rms(
+    y=audio,
+    frame_length=frame_length,
+    hop_length=energy_hop
+)[0]
+
+rms_times = librosa.frames_to_time(
+    np.arange(len(rms)),
+    sr=SAMPLE_RATE,
+    hop_length=energy_hop
+)
+
+noise_floor = np.percentile(rms, 20)
+
+threshold = max(
+    noise_floor * 2.0,
+    0.005
+)
+
+active = rms > threshold
+
+if np.any(active):
+
+    speech_start = rms_times[active][0]
+    speech_end = rms_times[active][-1]
+
+    print("\nSpeech activity")
+    print("----------------")
+
+    print(
+        f"Estimated start : {speech_start:.3f} sec"
+    )
+
+    print(
+        f"Estimated end   : {speech_end:.3f} sec"
+    )
+
+    print(
+        f"Estimated length: "
+        f"{speech_end - speech_start:.3f} sec"
+    )
+
+else:
+
+    speech_start = None
+    speech_end = None
+
+    print("\nNo obvious speech detected.")
+
+
+# ============================================================
+# MODEL PREDICTION
+# ============================================================
+
+prediction_raw = model.predict(
+    mfcc_normalized,
+    verbose=0
+)
+
+unknown_probability = float(prediction_raw[0][0])
+
+astra_probability = 1.0 - unknown_probability
+
+prediction = (
+    "ASTRA"
+    if astra_probability >= THRESHOLD
+    else "UNKNOWN"
+)
+
+print("\n" + "=" * 65)
+print("RESULT")
+print("=" * 65)
+
+print(
+    f"\nASTRA probability   : "
+    f"{astra_probability * 100:.2f}%"
+)
+
+print(
+    f"UNKNOWN probability : "
+    f"{unknown_probability * 100:.2f}%"
+)
+
+print("\nPrediction :", prediction)
+
+
+# ============================================================
+# CREATE OUTPUT DIRECTORY
+# ============================================================
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# ============================================================
+# PLOT 1 — WAVEFORM
+# ============================================================
+
+time = np.arange(len(audio)) / SAMPLE_RATE
+
+plt.figure(figsize=(12, 5))
+
+plt.plot(time, audio)
+
+if speech_start is not None:
+    plt.axvline(
+        speech_start,
+        linestyle="--",
+        label="Estimated speech start"
+    )
+
+if speech_end is not None:
+    plt.axvline(
+        speech_end,
+        linestyle="--",
+        label="Estimated speech end"
+    )
+
+plt.title("Fresh ASTRA Recording - Waveform")
+plt.xlabel("Time (seconds)")
+plt.ylabel("Amplitude")
+
+plt.grid(True)
+plt.legend()
+
+plt.tight_layout()
+
+waveform_path = os.path.join(
+    OUTPUT_DIR,
+    "fresh_waveform.png"
+)
+
+plt.savefig(
+    waveform_path,
+    dpi=150
+)
+
+plt.close()
+
+print("\nSaved:")
+print(waveform_path)
+
+
+# ============================================================
+# PLOT 2 — ENERGY
+# ============================================================
+
+plt.figure(figsize=(12, 5))
+
+plt.plot(
+    rms_times,
+    rms
+)
+
+plt.axhline(
+    threshold,
+    linestyle="--",
+    label="Speech threshold"
+)
+
+plt.title("Fresh ASTRA Recording - Energy")
+plt.xlabel("Time (seconds)")
+plt.ylabel("RMS Energy")
+
+plt.grid(True)
+plt.legend()
+
+plt.tight_layout()
+
+energy_path = os.path.join(
+    OUTPUT_DIR,
+    "fresh_energy.png"
+)
+
+plt.savefig(
+    energy_path,
+    dpi=150
+)
+
+plt.close()
+
+print("Saved:")
+print(energy_path)
+
+
+# ============================================================
+# PLOT 3 — MFCC
+# ============================================================
+
+plt.figure(figsize=(12, 6))
+
+librosa.display.specshow(
+    mfcc,
+    x_axis="time",
+    sr=SAMPLE_RATE,
+    hop_length=HOP_LENGTH
+)
+
+plt.colorbar()
+
+plt.title("Fresh ASTRA Recording - MFCC")
+plt.ylabel("MFCC Coefficient")
+
+plt.tight_layout()
+
+mfcc_path = os.path.join(
+    OUTPUT_DIR,
+    "fresh_mfcc.png"
+)
+
+plt.savefig(
+    mfcc_path,
+    dpi=150
+)
+
+plt.close()
+
+print("Saved:")
+print(mfcc_path)
+
+
+# ============================================================
+# PLOT 4 — NORMALIZED MFCC
+# ============================================================
+
+plt.figure(figsize=(12, 6))
+
+librosa.display.specshow(
+    mfcc_normalized[0, :, :, 0],
+    x_axis="time",
+    sr=SAMPLE_RATE,
+    hop_length=HOP_LENGTH
+)
+
+plt.colorbar()
+
+plt.title("Fresh ASTRA Recording - Normalized MFCC")
+plt.ylabel("MFCC Coefficient")
+
+plt.tight_layout()
+
+normalized_mfcc_path = os.path.join(
+    OUTPUT_DIR,
+    "fresh_normalized_mfcc.png"
+)
+
+plt.savefig(
+    normalized_mfcc_path,
+    dpi=150
+)
+
+plt.close()
+
+print("Saved:")
+print(normalized_mfcc_path)
+
+
+# ============================================================
+# DONE
+# ============================================================
+
+print("\n" + "=" * 65)
+print("DIAGNOSTICS COMPLETE")
+print("=" * 65)
+
+print("\nOpen these files in VS Code:")
+
+print("\n1.", waveform_path)
+print("2.", energy_path)
+print("3.", mfcc_path)
+print("4.", normalized_mfcc_path)

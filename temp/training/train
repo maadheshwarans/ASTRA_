@@ -1,0 +1,956 @@
+import os
+import numpy as np
+import tensorflow as tf
+
+from tensorflow.keras import layers
+from tensorflow.keras import models
+
+
+# ============================================================
+# ASTRA-Edge — Improved Tiny CNN Training
+# ============================================================
+
+RANDOM_SEED = 42
+
+np.random.seed(RANDOM_SEED)
+tf.random.set_seed(RANDOM_SEED)
+
+
+# ============================================================
+# Project paths
+# ============================================================
+
+PROJECT_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+FEATURES_DIR = os.path.join(
+    PROJECT_DIR,
+    "features"
+)
+
+MODELS_DIR = os.path.join(
+    PROJECT_DIR,
+    "models"
+)
+
+os.makedirs(MODELS_DIR, exist_ok=True)
+
+
+X_PATH = os.path.join(
+    FEATURES_DIR,
+    "X.npy"
+)
+
+Y_PATH = os.path.join(
+    FEATURES_DIR,
+    "y.npy"
+)
+
+METADATA_PATH = os.path.join(
+    FEATURES_DIR,
+    "metadata.npy"
+)
+
+
+# ============================================================
+# Training configuration
+# ============================================================
+
+EPOCHS = 100
+BATCH_SIZE = 8
+LEARNING_RATE = 0.001
+
+TEST_FRACTION = 0.20
+
+
+# ============================================================
+# Header
+# ============================================================
+
+print()
+print("=" * 75)
+print("          ASTRA-Edge — Improved Tiny CNN")
+print("=" * 75)
+
+print()
+print("Training improvements:")
+print("  • Per-MFCC normalization")
+print("  • Stratified 80/20 split")
+print("  • Class weighting")
+print("  • Validation monitoring")
+print()
+
+
+# ============================================================
+# Check files
+# ============================================================
+
+if not os.path.exists(X_PATH):
+    print("ERROR: X.npy not found.")
+    print("Run:")
+    print("python preprocessing\\prepare_dataset.py")
+    exit()
+
+if not os.path.exists(Y_PATH):
+    print("ERROR: y.npy not found.")
+    exit()
+
+if not os.path.exists(METADATA_PATH):
+    print("ERROR: metadata.npy not found.")
+    exit()
+
+
+# ============================================================
+# Load dataset
+# ============================================================
+
+print("Loading dataset...")
+
+X = np.load(X_PATH)
+y = np.load(Y_PATH)
+
+metadata = np.load(
+    METADATA_PATH,
+    allow_pickle=True
+)
+
+print()
+print("X shape:", X.shape)
+print("y shape:", y.shape)
+print("Metadata shape:", metadata.shape)
+
+
+# ============================================================
+# Check dataset
+# ============================================================
+
+if not np.isfinite(X).all():
+    print()
+    print("ERROR: X contains NaN or infinity.")
+    exit()
+
+if not np.isfinite(y).all():
+    print()
+    print("ERROR: y contains NaN or infinity.")
+    exit()
+
+
+# ============================================================
+# Display class distribution
+# ============================================================
+
+astra_indices = np.where(y == 0)[0]
+unknown_indices = np.where(y == 1)[0]
+
+print()
+print("=" * 75)
+print("DATASET")
+print("=" * 75)
+
+print()
+print("Total samples :", len(X))
+print("ASTRA         :", len(astra_indices))
+print("UNKNOWN       :", len(unknown_indices))
+
+
+# ============================================================
+# Find speakers
+# ============================================================
+
+speakers = []
+
+for item in metadata:
+
+    speaker = str(item[1])
+
+    if speaker not in speakers:
+        speakers.append(speaker)
+
+speakers.sort()
+
+print()
+print("Speakers detected:")
+print("------------------")
+
+for speaker in speakers:
+    print(" ", speaker)
+
+
+# ============================================================
+# Current evaluation mode
+# ============================================================
+
+if len(speakers) < 2:
+
+    print()
+    print("=" * 75)
+    print("PIPELINE-ONLY TRAINING")
+    print("=" * 75)
+
+    print()
+    print("Only one speaker is currently available.")
+    print()
+    print("The 80/20 split below is useful for checking")
+    print("training behaviour, but it is NOT a speaker-")
+    print("independent evaluation.")
+
+    speaker_aware_test = False
+
+else:
+
+    speaker_aware_test = True
+
+    print()
+    print("=" * 75)
+    print("SPEAKER-INDEPENDENT TRAINING")
+    print("=" * 75)
+
+    print()
+    print("Multiple speakers detected.")
+
+
+# ============================================================
+# Create train/test split
+# ============================================================
+
+if speaker_aware_test:
+
+    print()
+    print("Available speakers:")
+
+    for index, speaker in enumerate(
+        speakers,
+        start=1
+    ):
+        print(
+            f"{index}. {speaker}"
+        )
+
+    print()
+
+    while True:
+
+        try:
+
+            choice = int(
+                input("Choose test speaker: ")
+            )
+
+            if 1 <= choice <= len(speakers):
+                break
+
+            print("Invalid choice.")
+
+        except ValueError:
+
+            print("Enter a number.")
+
+    test_speaker = speakers[
+        choice - 1
+    ]
+
+    speaker_array = np.array(
+        [
+            str(item[1])
+            for item in metadata
+        ]
+    )
+
+    train_mask = (
+        speaker_array != test_speaker
+    )
+
+    test_mask = (
+        speaker_array == test_speaker
+    )
+
+    X_train = X[train_mask]
+    y_train = y[train_mask]
+
+    X_test = X[test_mask]
+    y_test = y[test_mask]
+
+else:
+
+    # --------------------------------------------------------
+    # Stratified 80/20 split
+    # --------------------------------------------------------
+
+    rng = np.random.default_rng(
+        RANDOM_SEED
+    )
+
+    train_indices = []
+    test_indices = []
+
+    # ASTRA
+    astra_shuffled = astra_indices.copy()
+
+    rng.shuffle(
+        astra_shuffled
+    )
+
+    astra_test_count = max(
+        1,
+        int(
+            len(astra_shuffled)
+            * TEST_FRACTION
+        )
+    )
+
+    test_indices.extend(
+        astra_shuffled[
+            :astra_test_count
+        ]
+    )
+
+    train_indices.extend(
+        astra_shuffled[
+            astra_test_count:
+        ]
+    )
+
+    # UNKNOWN
+    unknown_shuffled = unknown_indices.copy()
+
+    rng.shuffle(
+        unknown_shuffled
+    )
+
+    unknown_test_count = max(
+        1,
+        int(
+            len(unknown_shuffled)
+            * TEST_FRACTION
+        )
+    )
+
+    test_indices.extend(
+        unknown_shuffled[
+            :unknown_test_count
+        ]
+    )
+
+    train_indices.extend(
+        unknown_shuffled[
+            unknown_test_count:
+        ]
+    )
+
+    # Shuffle final sets
+    rng.shuffle(train_indices)
+    rng.shuffle(test_indices)
+
+    X_train = X[train_indices]
+    y_train = y[train_indices]
+
+    X_test = X[test_indices]
+    y_test = y[test_indices]
+
+
+# ============================================================
+# Display split
+# ============================================================
+
+print()
+print("=" * 75)
+print("DATASET SPLIT")
+print("=" * 75)
+
+print()
+print("Training samples :", len(X_train))
+print("Test samples     :", len(X_test))
+
+print()
+print("Training ASTRA   :", np.sum(y_train == 0))
+print("Training UNKNOWN :", np.sum(y_train == 1))
+
+print()
+print("Test ASTRA       :", np.sum(y_test == 0))
+print("Test UNKNOWN     :", np.sum(y_test == 1))
+
+
+# ============================================================
+# Verify classes exist
+# ============================================================
+
+if len(X_train) == 0:
+    print("ERROR: Training set is empty.")
+    exit()
+
+if len(X_test) == 0:
+    print("ERROR: Test set is empty.")
+    exit()
+
+if len(np.unique(y_train)) < 2:
+    print()
+    print("ERROR: Training set contains only one class.")
+    exit()
+
+
+# ============================================================
+# Normalize MFCC features
+# ============================================================
+
+print()
+print("=" * 75)
+print("NORMALIZATION")
+print("=" * 75)
+
+print()
+print("Calculating per-MFCC mean/std from training data...")
+
+
+# X shape:
+#
+# samples × MFCC × time × channel
+#
+# We keep one mean/std value for each MFCC coefficient.
+
+mean = np.mean(
+    X_train,
+    axis=(0, 2),
+    keepdims=True
+)
+
+std = np.std(
+    X_train,
+    axis=(0, 2),
+    keepdims=True
+)
+
+
+print()
+print("Mean shape:", mean.shape)
+print("Std shape :", std.shape)
+
+
+# Prevent division by zero.
+
+std = np.maximum(
+    std,
+    1e-8
+)
+
+
+X_train = (
+    X_train - mean
+) / std
+
+
+X_test = (
+    X_test - mean
+) / std
+
+
+print()
+print(
+    "Normalized training mean:",
+    np.mean(X_train)
+)
+
+print(
+    "Normalized training std :",
+    np.std(X_train)
+)
+
+
+# ============================================================
+# Class weights
+# ============================================================
+
+print()
+print("=" * 75)
+print("CLASS WEIGHTS")
+print("=" * 75)
+
+
+astra_count = np.sum(
+    y_train == 0
+)
+
+unknown_count = np.sum(
+    y_train == 1
+)
+
+total_count = (
+    astra_count
+    + unknown_count
+)
+
+
+# Balanced class weighting:
+#
+# weight = total / (classes × class_count)
+
+weight_astra = (
+    total_count
+    / (
+        2 * astra_count
+    )
+)
+
+weight_unknown = (
+    total_count
+    / (
+        2 * unknown_count
+    )
+)
+
+
+class_weights = {
+
+    0: weight_astra,
+
+    1: weight_unknown
+}
+
+
+print()
+print(
+    f"ASTRA weight   : {weight_astra:.4f}"
+)
+
+print(
+    f"UNKNOWN weight : {weight_unknown:.4f}"
+)
+
+
+# ============================================================
+# Build Tiny CNN
+# ============================================================
+
+print()
+print("=" * 75)
+print("BUILDING CNN")
+print("=" * 75)
+
+
+input_shape = X_train.shape[1:]
+
+
+model = models.Sequential([
+
+    layers.Input(
+        shape=input_shape
+    ),
+
+    layers.Conv2D(
+        filters=8,
+        kernel_size=(3, 3),
+        padding="same",
+        activation="relu"
+    ),
+
+    layers.MaxPooling2D(
+        pool_size=(2, 2)
+    ),
+
+    layers.Conv2D(
+        filters=16,
+        kernel_size=(3, 3),
+        padding="same",
+        activation="relu"
+    ),
+
+    layers.MaxPooling2D(
+        pool_size=(2, 2)
+    ),
+
+    layers.GlobalAveragePooling2D(),
+
+    layers.Dense(
+        16,
+        activation="relu"
+    ),
+
+    layers.Dense(
+        1,
+        activation="sigmoid"
+    )
+])
+
+
+# ============================================================
+# Compile
+# ============================================================
+
+model.compile(
+
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=LEARNING_RATE
+    ),
+
+    loss="binary_crossentropy",
+
+    metrics=[
+        "accuracy"
+    ]
+)
+
+
+# ============================================================
+# Model summary
+# ============================================================
+
+print()
+model.summary()
+
+
+# ============================================================
+# Training callbacks
+# ============================================================
+
+early_stopping = tf.keras.callbacks.EarlyStopping(
+
+    monitor="val_loss",
+
+    patience=15,
+
+    restore_best_weights=True
+)
+
+
+# ============================================================
+# Train
+# ============================================================
+
+print()
+print("=" * 75)
+print("TRAINING")
+print("=" * 75)
+
+print()
+print(
+    "Epochs       :",
+    EPOCHS
+)
+
+print(
+    "Batch size   :",
+    BATCH_SIZE
+)
+
+print(
+    "Learning rate:",
+    LEARNING_RATE
+)
+
+print()
+
+
+history = model.fit(
+
+    X_train,
+
+    y_train,
+
+    epochs=EPOCHS,
+
+    batch_size=BATCH_SIZE,
+
+    shuffle=True,
+
+    validation_data=(
+        X_test,
+        y_test
+    ),
+
+    class_weight=class_weights,
+
+    callbacks=[
+        early_stopping
+    ],
+
+    verbose=1
+)
+
+
+# ============================================================
+# Final evaluation
+# ============================================================
+
+print()
+print("=" * 75)
+print("FINAL TEST EVALUATION")
+print("=" * 75)
+
+
+test_loss, test_accuracy = model.evaluate(
+
+    X_test,
+
+    y_test,
+
+    verbose=0
+)
+
+
+print()
+print(
+    f"Test loss     : {test_loss:.4f}"
+)
+
+print(
+    f"Test accuracy : "
+    f"{test_accuracy * 100:.2f}%"
+)
+
+
+# ============================================================
+# Predictions
+# ============================================================
+
+predictions = model.predict(
+    X_test,
+    verbose=0
+).flatten()
+
+
+predicted_labels = (
+    predictions >= 0.5
+).astype(int)
+
+
+# Remember:
+#
+# 0 = ASTRA
+# 1 = UNKNOWN
+#
+# Therefore:
+#
+# UNKNOWN probability >= 0.5
+# ASTRA probability  = 1 - UNKNOWN probability
+
+
+# ============================================================
+# Confusion matrix
+# ============================================================
+
+print()
+print("=" * 75)
+print("CONFUSION MATRIX")
+print("=" * 75)
+
+true_astra = np.sum(
+    (y_test == 0)
+    & (predicted_labels == 0)
+)
+
+astra_as_unknown = np.sum(
+    (y_test == 0)
+    & (predicted_labels == 1)
+)
+
+unknown_as_astra = np.sum(
+    (y_test == 1)
+    & (predicted_labels == 0)
+)
+
+true_unknown = np.sum(
+    (y_test == 1)
+    & (predicted_labels == 1)
+)
+
+
+print()
+print("                     Predicted")
+print("                  ASTRA   UNKNOWN")
+print()
+print(
+    f"Actual ASTRA     "
+    f"{true_astra:5d}   "
+    f"{astra_as_unknown:7d}"
+)
+
+print(
+    f"Actual UNKNOWN   "
+    f"{unknown_as_astra:5d}   "
+    f"{true_unknown:7d}"
+)
+
+
+# ============================================================
+# KWS-specific metrics
+# ============================================================
+
+print()
+print("=" * 75)
+print("KEYWORD SPOTTING METRICS")
+print("=" * 75)
+
+
+if np.sum(y_test == 0) > 0:
+
+    true_positive_rate = (
+        true_astra
+        / np.sum(y_test == 0)
+    )
+
+else:
+
+    true_positive_rate = 0
+
+
+if np.sum(y_test == 1) > 0:
+
+    false_activation_rate = (
+        unknown_as_astra
+        / np.sum(y_test == 1)
+    )
+
+else:
+
+    false_activation_rate = 0
+
+
+print()
+print(
+    f"ASTRA detection rate : "
+    f"{true_positive_rate * 100:.2f}%"
+)
+
+print(
+    f"False activation rate: "
+    f"{false_activation_rate * 100:.2f}%"
+)
+
+
+# ============================================================
+# Show predictions
+# ============================================================
+
+print()
+print("=" * 75)
+print("TEST PREDICTIONS")
+print("=" * 75)
+
+print()
+print(
+    "Sample | Actual   | ASTRA % | UNKNOWN % | Prediction"
+)
+
+print("-" * 60)
+
+
+for i in range(len(predictions)):
+
+    unknown_probability = (
+        predictions[i]
+    )
+
+    astra_probability = (
+        1.0 - unknown_probability
+    )
+
+    if predicted_labels[i] == 0:
+
+        prediction = "ASTRA"
+
+    else:
+
+        prediction = "UNKNOWN"
+
+    if y_test[i] == 0:
+
+        actual = "ASTRA"
+
+    else:
+
+        actual = "UNKNOWN"
+
+    print(
+        f"{i+1:02d}     | "
+        f"{actual:<8} | "
+        f"{astra_probability * 100:6.2f} | "
+        f"{unknown_probability * 100:9.2f} | "
+        f"{prediction}"
+    )
+
+
+# ============================================================
+# Save model
+# ============================================================
+
+model_path = os.path.join(
+    MODELS_DIR,
+    "astra_cnn.keras"
+)
+
+model.save(
+    model_path
+)
+
+
+# ============================================================
+# Save normalization
+# ============================================================
+
+normalization_path = os.path.join(
+    MODELS_DIR,
+    "normalization.npz"
+)
+
+np.savez(
+    normalization_path,
+    mean=mean,
+    std=std
+)
+
+
+# ============================================================
+# Final summary
+# ============================================================
+
+print()
+print("=" * 75)
+print("TRAINING COMPLETE")
+print("=" * 75)
+
+print()
+
+if speaker_aware_test:
+
+    print(
+        "Evaluation type : SPEAKER-INDEPENDENT"
+    )
+
+    print(
+        "Unseen speaker  :",
+        test_speaker
+    )
+
+else:
+
+    print(
+        "Evaluation type : PIPELINE TEST ONLY"
+    )
+
+    print()
+    print(
+        "Only one speaker is available."
+    )
+
+    print(
+        "Do NOT report this as speaker-independent"
+    )
+
+    print(
+        "real-world performance."
+    )
+
+
+print()
+print("Model saved:")
+print(model_path)
+
+print()
+print("Normalization saved:")
+print(normalization_path)
+
+print()
+print("ASTRA-Edge training finished.")
+print()

@@ -1,0 +1,633 @@
+import os
+import hashlib
+import numpy as np
+from scipy.io import wavfile
+
+
+# ============================================================
+# ASTRA-Edge Speaker-Aware Dataset Analyzer
+# ============================================================
+
+EXPECTED_SAMPLE_RATE = 16000
+
+MIN_DURATION = 1.3
+MAX_DURATION = 1.7
+
+VERY_QUIET_RMS = 100
+POSSIBLE_CLIPPING_RATIO = 0.01
+
+CATEGORIES = [
+    "positive",
+    "negative",
+    "background",
+    "hard_negatives"
+]
+
+
+# ============================================================
+# Project directories
+# ============================================================
+
+PROJECT_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+DATASET_DIR = os.path.join(
+    PROJECT_DIR,
+    "dataset"
+)
+
+
+# ============================================================
+# File hash
+# ============================================================
+
+def get_file_hash(filepath):
+
+    sha256 = hashlib.sha256()
+
+    with open(filepath, "rb") as file:
+
+        while True:
+
+            data = file.read(65536)
+
+            if not data:
+                break
+
+            sha256.update(data)
+
+    return sha256.hexdigest()
+
+
+# ============================================================
+# Analyze one WAV file
+# ============================================================
+
+def analyze_file(filepath):
+
+    result = {
+        "status": "OK",
+        "sample_rate": None,
+        "channels": None,
+        "duration": None,
+        "rms": None,
+        "peak": None,
+        "clipping_ratio": None,
+        "problems": []
+    }
+
+    try:
+
+        sample_rate, audio = wavfile.read(filepath)
+
+        # ----------------------------------------------------
+        # Channels
+        # ----------------------------------------------------
+
+        if audio.ndim == 1:
+            channels = 1
+        else:
+            channels = audio.shape[1]
+
+        result["sample_rate"] = sample_rate
+        result["channels"] = channels
+
+
+        # ----------------------------------------------------
+        # Duration
+        # ----------------------------------------------------
+
+        duration = len(audio) / sample_rate
+
+        result["duration"] = duration
+
+
+        # ----------------------------------------------------
+        # Convert to float for analysis
+        # ----------------------------------------------------
+
+        audio_float = audio.astype(
+            np.float32
+        )
+
+
+        # ----------------------------------------------------
+        # RMS
+        # ----------------------------------------------------
+
+        rms = np.sqrt(
+            np.mean(audio_float ** 2)
+        )
+
+        result["rms"] = rms
+
+
+        # ----------------------------------------------------
+        # Peak
+        # ----------------------------------------------------
+
+        peak = np.max(
+            np.abs(audio_float)
+        )
+
+        result["peak"] = peak
+
+
+        # ----------------------------------------------------
+        # Clipping
+        # ----------------------------------------------------
+
+        if np.issubdtype(
+            audio.dtype,
+            np.integer
+        ):
+
+            max_possible = np.iinfo(
+                audio.dtype
+            ).max
+
+            min_possible = np.iinfo(
+                audio.dtype
+            ).min
+
+            clipped = np.sum(
+                (audio == max_possible) |
+                (audio == min_possible)
+            )
+
+        else:
+
+            clipped = np.sum(
+                np.abs(audio_float) >= 1.0
+            )
+
+
+        total_samples = audio_float.size
+
+        clipping_ratio = (
+            clipped / total_samples
+        )
+
+        result["clipping_ratio"] = clipping_ratio
+
+
+        # ----------------------------------------------------
+        # Validation
+        # ----------------------------------------------------
+
+        if sample_rate != EXPECTED_SAMPLE_RATE:
+
+            result["problems"].append(
+                f"Wrong sample rate: "
+                f"{sample_rate} Hz"
+            )
+
+
+        if channels != 1:
+
+            result["problems"].append(
+                f"Not mono: "
+                f"{channels} channels"
+            )
+
+
+        if duration < MIN_DURATION:
+
+            result["problems"].append(
+                f"Too short: "
+                f"{duration:.2f}s"
+            )
+
+        elif duration > MAX_DURATION:
+
+            result["problems"].append(
+                f"Too long: "
+                f"{duration:.2f}s"
+            )
+
+
+        if rms < VERY_QUIET_RMS:
+
+            result["problems"].append(
+                f"Very quiet: "
+                f"RMS={rms:.1f}"
+            )
+
+
+        if clipping_ratio > POSSIBLE_CLIPPING_RATIO:
+
+            result["problems"].append(
+                f"Possible clipping: "
+                f"{clipping_ratio * 100:.2f}%"
+            )
+
+
+        if result["problems"]:
+
+            result["status"] = "CHECK"
+
+
+    except Exception as error:
+
+        result["status"] = "ERROR"
+
+        result["problems"].append(
+            str(error)
+        )
+
+
+    return result
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+
+    print()
+    print("=" * 110)
+    print("             ASTRA-Edge Speaker-Aware Dataset Analyzer")
+    print("=" * 110)
+
+
+    # ========================================================
+    # Find speakers
+    # ========================================================
+
+    if not os.path.exists(DATASET_DIR):
+
+        print()
+        print("ERROR: Dataset folder not found.")
+        return
+
+
+    speakers = []
+
+    for item in os.listdir(DATASET_DIR):
+
+        path = os.path.join(
+            DATASET_DIR,
+            item
+        )
+
+        if os.path.isdir(path):
+
+            speakers.append(item)
+
+
+    speakers.sort()
+
+
+    if not speakers:
+
+        print()
+        print("ERROR: No speaker folders found.")
+        print()
+        print("Expected structure:")
+        print("dataset/1/")
+        print("dataset/2/")
+        print("dataset/3/")
+        print("dataset/4/")
+        return
+
+
+    print()
+    print("Speakers found:")
+    print(
+        "  " +
+        ", ".join(speakers)
+    )
+
+
+    # ========================================================
+    # Find files
+    # ========================================================
+
+    all_files = []
+
+
+    for speaker in speakers:
+
+        speaker_dir = os.path.join(
+            DATASET_DIR,
+            speaker
+        )
+
+
+        for category in CATEGORIES:
+
+            category_dir = os.path.join(
+                speaker_dir,
+                category
+            )
+
+
+            if not os.path.exists(category_dir):
+                continue
+
+
+            files = sorted(
+                file
+                for file in os.listdir(
+                    category_dir
+                )
+                if file.lower().endswith(".wav")
+            )
+
+
+            for filename in files:
+
+                filepath = os.path.join(
+                    category_dir,
+                    filename
+                )
+
+                all_files.append(
+                    (
+                        speaker,
+                        category,
+                        filename,
+                        filepath
+                    )
+                )
+
+
+    total = len(all_files)
+
+    good = 0
+    check = 0
+    errors = 0
+
+
+    # ========================================================
+    # Analyze files
+    # ========================================================
+
+    print()
+    print("DATASET FILES")
+    print("-" * 110)
+
+    print(
+        f"{'Speaker':<12}"
+        f"{'Category':<18}"
+        f"{'File':<30}"
+        f"{'Status':<10}"
+        f"{'Duration':<12}"
+        f"{'RMS':<12}"
+        f"{'Peak':<12}"
+    )
+
+    print("-" * 110)
+
+
+    for speaker, category, filename, filepath in all_files:
+
+        result = analyze_file(
+            filepath
+        )
+
+
+        if result["status"] == "OK":
+
+            good += 1
+
+        elif result["status"] == "ERROR":
+
+            errors += 1
+
+        else:
+
+            check += 1
+
+
+        print(
+            f"{speaker:<12}"
+            f"{category:<18}"
+            f"{filename:<30}"
+            f"{result['status']:<10}"
+            f"{result['duration']:.2f}s{'':<7}"
+            f"{result['rms']:.1f}{'':<7}"
+            f"{result['peak']:.1f}"
+        )
+
+
+        for problem in result["problems"]:
+
+            print(
+                f"    WARNING: {problem}"
+            )
+
+
+    # ========================================================
+    # Duplicate check
+    # ========================================================
+
+    print()
+    print("=" * 110)
+    print("DUPLICATE FILE CHECK")
+    print("=" * 110)
+
+
+    hashes = {}
+    duplicates = []
+
+
+    for speaker, category, filename, filepath in all_files:
+
+        try:
+
+            file_hash = get_file_hash(
+                filepath
+            )
+
+
+            if file_hash in hashes:
+
+                original = hashes[
+                    file_hash
+                ]
+
+                duplicates.append(
+                    (
+                        original,
+                        (
+                            speaker,
+                            category,
+                            filename
+                        )
+                    )
+                )
+
+            else:
+
+                hashes[file_hash] = (
+                    speaker,
+                    category,
+                    filename
+                )
+
+
+        except Exception:
+
+            pass
+
+
+    if duplicates:
+
+        print()
+        print("DUPLICATES FOUND:")
+        print()
+
+
+        for original, duplicate in duplicates:
+
+            print(
+                f"{original[0]}/"
+                f"{original[1]}/"
+                f"{original[2]}"
+            )
+
+            print(
+                "    = "
+                f"{duplicate[0]}/"
+                f"{duplicate[1]}/"
+                f"{duplicate[2]}"
+            )
+
+    else:
+
+        print()
+        print("No exact duplicate files found.")
+
+
+    # ========================================================
+    # Per-speaker summary
+    # ========================================================
+
+    print()
+    print("=" * 110)
+    print("PER-SPEAKER SUMMARY")
+    print("=" * 110)
+
+
+    for speaker in speakers:
+
+        print()
+        print(f"Speaker {speaker}")
+        print("-" * 50)
+
+
+        speaker_total = 0
+
+
+        for category in CATEGORIES:
+
+            count = sum(
+                1
+                for item in all_files
+                if item[0] == speaker
+                and item[1] == category
+            )
+
+            speaker_total += count
+
+            print(
+                f"{category:<20}: {count}"
+            )
+
+
+        print(
+            f"{'TOTAL':<20}: {speaker_total}"
+        )
+
+
+    # ========================================================
+    # Overall category summary
+    # ========================================================
+
+    print()
+    print("=" * 110)
+    print("OVERALL CATEGORY SUMMARY")
+    print("=" * 110)
+
+
+    for category in CATEGORIES:
+
+        count = sum(
+            1
+            for item in all_files
+            if item[1] == category
+        )
+
+        print(
+            f"{category:<20}: {count}"
+        )
+
+
+    # ========================================================
+    # Final summary
+    # ========================================================
+
+    print()
+    print("=" * 110)
+    print("FINAL SUMMARY")
+    print("=" * 110)
+
+    print()
+    print(
+        f"Total files    : {total}"
+    )
+
+    print(
+        f"Passed         : {good}"
+    )
+
+    print(
+        f"Needs checking : {check}"
+    )
+
+    print(
+        f"Errors         : {errors}"
+    )
+
+    print(
+        f"Speakers       : {len(speakers)}"
+    )
+
+
+    print()
+
+    if duplicates:
+
+        print(
+            "WARNING: Exact duplicates detected."
+        )
+
+        print(
+            "Remove them before training."
+        )
+
+    else:
+
+        print(
+            "No exact duplicates."
+        )
+
+
+    print()
+    print("=" * 110)
+    print("Dataset analysis complete.")
+    print("=" * 110)
+    print()
+
+
+# ============================================================
+# Run
+# ============================================================
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,167 @@
+"""
+ASTRA-Edge — MFCC Extraction & Visualization
+---------------------------------------------
+Reads .wav samples from the four dataset folders (positive, negative,
+background, hard_negatives), extracts MFCC features for every file,
+and plots a few example MFCCs per class so you can visually sanity-check
+that the classes actually look distinguishable before training anything.
+
+Expected folder structure (same BASE_DIR as your recorder script):
+    BASE_DIR/
+        positive/
+        negative/
+        background/
+        hard_negatives/
+
+Usage:
+    python extract_and_visualize_mfcc.py
+"""
+
+import os
+import numpy as np
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+
+# ----------------------------
+# Config — match your recorder script
+# ----------------------------
+SAMPLE_RATE = 16000
+N_MFCC = 13
+N_FFT = 512          # ~32ms window at 16kHz
+HOP_LENGTH = 160      # 10ms stride at 16kHz
+N_MELS = 32
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+FOLDERS = {
+    "positive": "ASTRA (keyword)",
+    "negative": "Negative",
+    "background": "Background/Noise",
+    "hard_negatives": "Hard Negatives",
+}
+
+OUTPUT_DIR = os.path.join(BASE_DIR, "features")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def extract_mfcc(filepath):
+    """Load a wav file and return its MFCC feature matrix (n_mfcc x time_steps)."""
+    audio, sr = librosa.load(filepath, sr=SAMPLE_RATE, mono=True)
+
+    mfcc = librosa.feature.mfcc(
+        y=audio,
+        sr=sr,
+        n_mfcc=N_MFCC,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+        n_mels=N_MELS,
+    )
+    return mfcc
+
+
+def process_folder(folder_name):
+    """Extract MFCCs for every wav in a folder, save as .npy, return list of (filename, mfcc)."""
+    folder_path = os.path.join(BASE_DIR, folder_name)
+
+    if not os.path.isdir(folder_path):
+        print(f"  [skip] folder not found: {folder_path}")
+        return []
+
+    wav_files = sorted(f for f in os.listdir(folder_path) if f.lower().endswith(".wav"))
+
+    if not wav_files:
+        print(f"  [skip] no .wav files in {folder_path}")
+        return []
+
+    save_dir = os.path.join(OUTPUT_DIR, folder_name)
+    os.makedirs(save_dir, exist_ok=True)
+
+    results = []
+    for fname in wav_files:
+        fpath = os.path.join(folder_path, fname)
+        try:
+            mfcc = extract_mfcc(fpath)
+        except Exception as e:
+            print(f"  [error] failed on {fname}: {e}")
+            continue
+
+        # Save feature matrix alongside raw audio, mirrored folder structure
+        npy_name = os.path.splitext(fname)[0] + ".npy"
+        np.save(os.path.join(save_dir, npy_name), mfcc)
+
+        results.append((fname, mfcc))
+
+    print(f"  processed {len(results)}/{len(wav_files)} files -> saved to {save_dir}")
+    return results
+
+
+def visualize_examples(all_results, n_examples=3):
+    """Plot n_examples MFCCs per class in a grid for visual comparison."""
+    classes = [c for c in FOLDERS if all_results.get(c)]
+
+    if not classes:
+        print("\nNo data found to visualize. Record some samples first.")
+        return
+
+    fig, axes = plt.subplots(
+        len(classes), n_examples,
+        figsize=(4 * n_examples, 3 * len(classes)),
+        squeeze=False,
+    )
+
+    for row, class_name in enumerate(classes):
+        examples = all_results[class_name][:n_examples]
+
+        for col in range(n_examples):
+            ax = axes[row][col]
+
+            if col < len(examples):
+                fname, mfcc = examples[col]
+                img = librosa.display.specshow(
+                    mfcc,
+                    sr=SAMPLE_RATE,
+                    hop_length=HOP_LENGTH,
+                    x_axis="time",
+                    ax=ax,
+                    cmap="viridis",
+                )
+                ax.set_title(f"{FOLDERS[class_name]}\n{fname}", fontsize=8)
+                ax.set_ylabel("MFCC coeff")
+            else:
+                ax.axis("off")
+
+    plt.tight_layout()
+    out_path = os.path.join(OUTPUT_DIR, "mfcc_comparison.png")
+    plt.savefig(out_path, dpi=150)
+    print(f"\nSaved comparison plot -> {out_path}")
+    plt.show()
+
+
+def main():
+    print("ASTRA-Edge — MFCC Extraction")
+    print("-----------------------------")
+    print(f"Sample rate : {SAMPLE_RATE} Hz")
+    print(f"n_mfcc      : {N_MFCC}")
+    print(f"n_fft       : {N_FFT}")
+    print(f"hop_length  : {HOP_LENGTH}")
+    print(f"n_mels      : {N_MELS}\n")
+
+    all_results = {}
+    for folder_name, label in FOLDERS.items():
+        print(f"Processing '{folder_name}' ({label})...")
+        all_results[folder_name] = process_folder(folder_name)
+
+    total = sum(len(v) for v in all_results.values())
+    print(f"\nTotal files processed: {total}")
+
+    if total == 0:
+        print("\nNo samples found. Record some using your recorder script first,")
+        print("then run this script again from the same directory.")
+        return
+
+    visualize_examples(all_results, n_examples=3)
+
+
+if __name__ == "__main__":
+    main()

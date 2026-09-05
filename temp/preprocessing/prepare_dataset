@@ -1,0 +1,480 @@
+import os
+import numpy as np
+import librosa
+
+
+# ============================================================
+# ASTRA-Edge Batch MFCC Dataset Processor
+# ============================================================
+
+SAMPLE_RATE = 16000
+DURATION = 1.5
+
+N_MFCC = 13
+N_FFT = 512
+HOP_LENGTH = 160
+
+# Target RMS level for amplitude normalization
+TARGET_RMS = 0.03
+
+# Prevent extreme amplification of very quiet recordings
+MAX_GAIN = 5.0
+
+CATEGORIES = {
+    "positive": 0,
+    "negative": 1,
+    "background": 1,
+    "hard_negatives": 1
+}
+
+
+# ============================================================
+# Project directories
+# ============================================================
+
+PROJECT_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+DATASET_DIR = os.path.join(
+    PROJECT_DIR,
+    "dataset"
+)
+
+FEATURES_DIR = os.path.join(
+    PROJECT_DIR,
+    "features"
+)
+
+os.makedirs(
+    FEATURES_DIR,
+    exist_ok=True
+)
+
+
+# ============================================================
+# Normalize audio amplitude
+# ============================================================
+
+def normalize_amplitude(audio):
+
+    audio = np.asarray(
+        audio,
+        dtype=np.float32
+    )
+
+    rms = np.sqrt(
+        np.mean(
+            audio ** 2
+        )
+    )
+
+    # Completely silent audio
+    if rms < 1e-6:
+
+        return audio
+
+    # Calculate required gain
+    gain = TARGET_RMS / rms
+
+    # Prevent excessive amplification
+    gain = min(
+        gain,
+        MAX_GAIN
+    )
+
+    audio = audio * gain
+
+    # Prevent clipping
+    peak = np.max(
+        np.abs(audio)
+    )
+
+    if peak > 0.99:
+
+        audio = (
+            audio / peak
+        ) * 0.99
+
+    return audio.astype(
+        np.float32
+    )
+
+
+# ============================================================
+# Process one audio file
+# ============================================================
+
+def extract_mfcc(filepath):
+
+    # --------------------------------------------------------
+    # Load audio
+    # --------------------------------------------------------
+
+    audio, sr = librosa.load(
+        filepath,
+        sr=SAMPLE_RATE,
+        mono=True
+    )
+
+    # --------------------------------------------------------
+    # Force exactly 1.5 seconds
+    # --------------------------------------------------------
+
+    expected_samples = int(
+        SAMPLE_RATE * DURATION
+    )
+
+    if len(audio) < expected_samples:
+
+        audio = np.pad(
+            audio,
+            (
+                0,
+                expected_samples - len(audio)
+            )
+        )
+
+    else:
+
+        audio = audio[:expected_samples]
+
+    # --------------------------------------------------------
+    # Normalize amplitude
+    # --------------------------------------------------------
+
+    audio = normalize_amplitude(
+        audio
+    )
+
+    # --------------------------------------------------------
+    # Extract MFCC
+    # --------------------------------------------------------
+
+    mfcc = librosa.feature.mfcc(
+        y=audio,
+        sr=SAMPLE_RATE,
+        n_mfcc=N_MFCC,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH
+    )
+
+    return mfcc.astype(
+        np.float32
+    )
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+
+    print()
+    print("=" * 70)
+    print("          ASTRA-Edge MFCC Dataset Processor")
+    print("=" * 70)
+
+    print()
+    print("Dataset directory:")
+    print(DATASET_DIR)
+
+    print()
+    print("Feature directory:")
+    print(FEATURES_DIR)
+
+    print()
+    print("MFCC configuration")
+    print("------------------")
+    print("Sample rate :", SAMPLE_RATE)
+    print("Duration    :", DURATION, "seconds")
+    print("MFCCs       :", N_MFCC)
+    print("FFT size    :", N_FFT)
+    print("Hop length  :", HOP_LENGTH)
+
+    print()
+    print("Amplitude normalization")
+    print("-----------------------")
+    print("Target RMS  :", TARGET_RMS)
+    print("Maximum gain:", MAX_GAIN)
+
+
+    # ========================================================
+    # Find all WAV files
+    # ========================================================
+
+    files = []
+
+    for root, directories, filenames in os.walk(
+        DATASET_DIR
+    ):
+
+        for filename in filenames:
+
+            if filename.lower().endswith(".wav"):
+
+                filepath = os.path.join(
+                    root,
+                    filename
+                )
+
+                files.append(
+                    filepath
+                )
+
+    files.sort()
+
+    if not files:
+
+        print()
+        print("ERROR: No WAV files found.")
+        return
+
+    print()
+    print(
+        "Found",
+        len(files),
+        "WAV files."
+    )
+
+
+    # ========================================================
+    # Process files
+    # ========================================================
+
+    X = []
+    y = []
+    metadata = []
+
+    successful = 0
+    failed = 0
+
+
+    for index, filepath in enumerate(files):
+
+        relative_path = os.path.relpath(
+            filepath,
+            DATASET_DIR
+        )
+
+        parts = relative_path.split(
+            os.sep
+        )
+
+
+        # ----------------------------------------------------
+        # Determine category
+        # ----------------------------------------------------
+
+        category = None
+
+        for possible_category in CATEGORIES:
+
+            if possible_category in parts:
+
+                category = possible_category
+                break
+
+        if category is None:
+
+            print()
+            print(
+                "SKIPPING - category not found:",
+                relative_path
+            )
+
+            failed += 1
+            continue
+
+        label = CATEGORIES[
+            category
+        ]
+
+
+        # ----------------------------------------------------
+        # Determine speaker
+        # ----------------------------------------------------
+
+        if len(parts) >= 3:
+
+            speaker = parts[0]
+
+        else:
+
+            speaker = "unknown"
+
+
+        # ----------------------------------------------------
+        # Extract MFCC
+        # ----------------------------------------------------
+
+        try:
+
+            mfcc = extract_mfcc(
+                filepath
+            )
+
+            X.append(
+                mfcc
+            )
+
+            y.append(
+                label
+            )
+
+            metadata.append(
+                (
+                    relative_path,
+                    speaker,
+                    category
+                )
+            )
+
+            successful += 1
+
+            print(
+                f"[{index + 1}/{len(files)}] "
+                f"{relative_path:<55} "
+                f"MFCC {mfcc.shape}"
+            )
+
+        except Exception as error:
+
+            print()
+            print(
+                "ERROR:",
+                relative_path
+            )
+
+            print(
+                "       ",
+                error
+            )
+
+            failed += 1
+
+
+    # ========================================================
+    # Convert to NumPy arrays
+    # ========================================================
+
+    X = np.array(
+        X,
+        dtype=np.float32
+    )
+
+    y = np.array(
+        y,
+        dtype=np.int64
+    )
+
+
+    # ========================================================
+    # Add CNN channel dimension
+    # ========================================================
+
+    # Before:
+    #
+    # X = (samples, 13, time)
+    #
+    # After:
+    #
+    # X = (samples, 13, time, 1)
+
+    X = X[
+        ...,
+        np.newaxis
+    ]
+
+
+    # ========================================================
+    # Save arrays
+    # ========================================================
+
+    X_path = os.path.join(
+        FEATURES_DIR,
+        "X.npy"
+    )
+
+    y_path = os.path.join(
+        FEATURES_DIR,
+        "y.npy"
+    )
+
+    metadata_path = os.path.join(
+        FEATURES_DIR,
+        "metadata.npy"
+    )
+
+    np.save(
+        X_path,
+        X
+    )
+
+    np.save(
+        y_path,
+        y
+    )
+
+    np.save(
+        metadata_path,
+        np.array(
+            metadata,
+            dtype=object
+        )
+    )
+
+
+    # ========================================================
+    # Summary
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("                 PROCESSING COMPLETE")
+    print("=" * 70)
+
+    print()
+    print(
+        "Successful files :",
+        successful
+    )
+
+    print(
+        "Failed files     :",
+        failed
+    )
+
+    print()
+    print(
+        "X shape          :",
+        X.shape
+    )
+
+    print(
+        "y shape          :",
+        y.shape
+    )
+
+    print()
+    print("Label 0 = ASTRA")
+    print("Label 1 = UNKNOWN")
+
+    print()
+    print("Saved:")
+    print(X_path)
+    print(y_path)
+    print(metadata_path)
+
+    print()
+    print("Ready for CNN training.")
+
+
+# ============================================================
+# Run
+# ============================================================
+
+if __name__ == "__main__":
+    main()
